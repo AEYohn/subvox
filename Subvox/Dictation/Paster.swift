@@ -7,6 +7,10 @@ import ApplicationServices
 enum Paster {
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
+    /// The user's clipboard while a restore is pending, and the change count of the text we put
+    /// there. A second paste before that restore must restore this, not the first dictation.
+    private static var pending: (saved: [[NSPasteboard.PasteboardType: Data]], changeCount: Int)?
+
     static func requestTrust() {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
@@ -27,17 +31,25 @@ enum Paster {
             board.setString(text, forType: .string)
             return false
         }
-        let saved: [[NSPasteboard.PasteboardType: Data]] = (board.pasteboardItems ?? []).map { item in
-            Dictionary(item.types.compactMap { type in item.data(forType: type).map { (type, $0) } },
-                       uniquingKeysWith: { first, _ in first })
+        let saved: [[NSPasteboard.PasteboardType: Data]]
+        if let pending, pending.changeCount == board.changeCount {
+            // The clipboard still holds our last dictation; the user's own is the one saved then.
+            saved = pending.saved
+        } else {
+            saved = (board.pasteboardItems ?? []).map { item in
+                Dictionary(item.types.compactMap { type in item.data(forType: type).map { (type, $0) } },
+                           uniquingKeysWith: { first, _ in first })
+            }
         }
         board.clearContents()
         board.setString(text, forType: .string)
         let ours = board.changeCount
+        pending = (saved, ours)
         postCommandV()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            // Someone copied something in the meantime: leave their clipboard alone.
+            // Someone copied something in the meantime, or a later paste now owns the restore.
             guard board.changeCount == ours else { return }
+            pending = nil
             board.clearContents()
             let items = saved.map { types -> NSPasteboardItem in
                 let item = NSPasteboardItem()

@@ -70,6 +70,9 @@ final class DictationController {
             if !isTrusted { Paster.requestTrust() }
             guard let audio else { return }
             if !audio.isRunning { await audio.start() }
+            // Another call (launch restore, the toggle, the menu) may have enabled us during the
+            // await; a second sink would feed every buffer to the clip twice.
+            guard !isEnabled else { return }
             guard audio.isRunning else {
                 error = audio.error ?? "The microphone didn't start."
                 return
