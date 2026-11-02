@@ -13,12 +13,14 @@ final class AppModel {
         case sensors = "Sensors"
         case train = "Train"
         case decode = "Decode"
+        case dictate = "Dictate"
         var id: String { rawValue }
         var symbol: String {
             switch self {
             case .sensors: "waveform.path.ecg"
             case .train: "square.stack.3d.up"
             case .decode: "text.bubble"
+            case .dictate: "mic"
             }
         }
     }
@@ -28,6 +30,7 @@ final class AppModel {
     let transcriber = MicTranscriber()
     let capture = CaptureController()
     let recorder = SessionRecorder()
+    let dictation = DictationController()
 
     var screen: Screen = .train {
         didSet { syncCaptureMode() }
@@ -44,6 +47,24 @@ final class AppModel {
     private(set) var evaluation: Evaluation?
     private(set) var isEvaluating = false
     private(set) var lastTemplateID: Template.ID?
+
+    // Which takes Evaluate uses. Dictation adds many one-off words, so only words with
+    // enough takes are scored, and only the most-recorded `maxWords` of them.
+    var evalSource: TemplateSource = .all {
+        didSet { evaluation = nil }
+    }
+    var minTakes = 3 {
+        didSet { evaluation = nil }
+    }
+    var maxWords = 20 {
+        didSet { evaluation = nil }
+    }
+    private(set) var comparison: SourceComparisonResult?
+    private(set) var isComparing = false
+    private(set) var accuracyLog: [AccuracyLogEntry] = AccuracyLog.load()
+
+    var whisperTakeCount: Int { dataset.templates.filter(\.isFromWhisper).count }
+    var manualTakeCount: Int { dataset.templates.count - whisperTakeCount }
 
     // MARK: Decoding
 
@@ -71,11 +92,17 @@ final class AppModel {
         motion.start()
         audio.refreshDevices()
         installKeyMonitor()
+        dictation.configure(audio: audio)
+        dictation.onWords = { [weak self] words in self?.addWhisperWords(words) ?? [] }
+        if DictationController.wasEnabled {
+            Task { await dictation.setEnabled(true) }
+        }
     }
 
     private func ingest(_ sample: MotionSample) {
         capture.ingest(sample)
         recorder.record(sample)
+        dictation.ingest(sample)
     }
 
     private func syncCaptureMode() {
@@ -95,7 +122,7 @@ final class AppModel {
             decoded.append(DecodedWord(prediction: prediction))
             recorder.logEvent(segment, kind: prediction.accepted ? "decode" : "reject",
                               label: prediction.best?.label ?? "", confidence: prediction.confidence)
-        case .sensors:
+        case .sensors, .dictate:
             recorder.logEvent(segment, kind: "segment", label: recorder.prompt, confidence: nil)
         }
     }
@@ -127,6 +154,7 @@ final class AppModel {
         case .train: return selectedWord != nil
         case .decode: return decodeMode == .hold && classifier != nil
         case .sensors: return recorder.isRecording
+        case .dictate: return false
         }
     }
 
@@ -157,6 +185,29 @@ final class AppModel {
         persist()
     }
 
+    /// Dictation's per-word motion, labelled by Whisper. Returns the words kept.
+    func addWhisperWords(_ words: [AlignedWord]) -> [String] {
+        var kept: [String] = []
+        for word in words {
+            let known = dataset.vocabulary.contains(word.word)
+            if dictation.onlyVocabularyWords && !known { continue }
+            if !known { dataset.vocabulary.append(word.word) }
+            let template = Template(label: word.word, samples: word.samples, source: Template.whisperSource)
+            dataset.templates.append(template)
+            lastTemplateID = template.id
+            kept.append(word.word)
+        }
+        if !kept.isEmpty { persist() }
+        return kept
+    }
+
+    func deleteWhisperTakes() {
+        dataset.templates.removeAll(where: \.isFromWhisper)
+        let used = Set(dataset.templates.map(\.label))
+        dataset.vocabulary.removeAll { !used.contains($0) && !Dataset.starter.vocabulary.contains($0) }
+        persist()
+    }
+
     func deleteTemplate(_ id: Template.ID) {
         dataset.templates.removeAll { $0.id == id }
         persist()
@@ -172,18 +223,58 @@ final class AppModel {
         evaluation = nil
     }
 
+    var evaluationSubset: [Template] {
+        DatasetSubset.select(dataset.templates, source: evalSource, minTakes: minTakes, maxWords: maxWords)
+    }
+
     func evaluate() {
         guard !isEvaluating else { return }
         isEvaluating = true
-        let templates = dataset.templates
+        let templates = evaluationSubset
         let featureSet = featureSet
+        let source = evalSource
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 Evaluation.run(templates: templates, featureSet: featureSet)
             }.value
             self.evaluation = result
             self.isEvaluating = false
+            if let result {
+                self.log(test: "Leave-one-out · \(source.rawValue)", takes: result.templateCount,
+                         references: result.templateCount - 1, words: result.labels.count,
+                         accuracy: result.accuracy, chance: result.chance, pValue: result.pValue)
+            }
         }
+    }
+
+    /// The question behind Whisper labelling: does speech-labelled data help on hand-labelled takes?
+    func compareSources() {
+        guard !isComparing else { return }
+        isComparing = true
+        let templates = dataset.templates
+        let featureSet = featureSet
+        let minTakes = minTakes
+        let maxWords = maxWords
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                SourceComparisonResult.run(templates: templates, featureSet: featureSet,
+                                           minTakes: minTakes, maxWords: maxWords)
+            }.value
+            self.comparison = result
+            self.isComparing = false
+            for row in result.rows {
+                guard let score = row.score else { continue }
+                self.log(test: row.title, takes: score.tested, references: score.references,
+                         words: score.labels.count, accuracy: score.accuracy, chance: score.chance, pValue: row.pValue)
+            }
+        }
+    }
+
+    private func log(test: String, takes: Int, references: Int, words: Int, accuracy: Double, chance: Double, pValue: Double?) {
+        let entry = AccuracyLogEntry(date: Date(), test: test, takes: takes, references: references, words: words,
+                                     accuracy: accuracy, chance: chance, pValue: pValue, features: featureSet.summary)
+        AccuracyLog.append(entry)
+        accuracyLog.insert(entry, at: 0)
     }
 
     // MARK: Decode transcript

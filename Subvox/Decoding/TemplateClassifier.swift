@@ -5,6 +5,20 @@ struct Template: Codable, Identifiable, Hashable, Sendable {
     var label: String
     var samples: [MotionSample]
     var createdAt = Date()
+    /// `nil` for takes recorded on the Train screen; `"whisper"` for takes cut from dictation
+    /// and labelled by Whisper's transcript.
+    var source: String?
+
+    init(id: UUID = UUID(), label: String, samples: [MotionSample], createdAt: Date = Date(), source: String? = nil) {
+        self.id = id
+        self.label = label
+        self.samples = samples
+        self.createdAt = createdAt
+        self.source = source
+    }
+
+    static let whisperSource = "whisper"
+    var isFromWhisper: Bool { source == Self.whisperSource }
 
     var duration: TimeInterval {
         guard let first = samples.first, let last = samples.last else { return 0 }

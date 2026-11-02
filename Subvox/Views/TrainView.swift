@@ -140,6 +140,21 @@ private struct EvaluationPanel: View {
                     Button(model.isEvaluating ? "Evaluating…" : "Evaluate") { model.evaluate() }
                         .disabled(model.isEvaluating || model.featureSet.isEmpty)
                 }
+                HStack(spacing: 16) {
+                    Picker("Takes:", selection: Bindable(model).evalSource) {
+                        ForEach(TemplateSource.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .fixedSize()
+                    Stepper("Words with ≥ \(model.minTakes) takes", value: Bindable(model).minTakes, in: 2...20)
+                        .fixedSize()
+                    Stepper("Top \(model.maxWords) words", value: Bindable(model).maxWords, in: 2...60, step: 2)
+                        .fixedSize()
+                    Spacer()
+                    let subset = model.evaluationSubset
+                    Text("\(subset.count) takes · \(Set(subset.map(\.label)).count) words")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
                 if let result = model.evaluation {
                     EvaluationResultView(result: result)
                 } else {
