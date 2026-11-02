@@ -202,9 +202,10 @@ final class AppModel {
     }
 
     func deleteWhisperTakes() {
-        dataset.templates.removeAll(where: \.isFromWhisper)
-        let used = Set(dataset.templates.map(\.label))
-        dataset.vocabulary.removeAll { !used.contains($0) && !Dataset.starter.vocabulary.contains($0) }
+        dataset = dataset.withoutWhisperTakes()
+        if let selectedWord, !dataset.vocabulary.contains(selectedWord) {
+            self.selectedWord = dataset.vocabulary.first
+        }
         persist()
     }
 

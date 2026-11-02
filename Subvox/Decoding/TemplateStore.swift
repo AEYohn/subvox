@@ -5,6 +5,18 @@ struct Dataset: Codable {
     var templates: [Template]
 
     static let starter = Dataset(vocabulary: ["yes", "no", "next", "back", "stop"], templates: [])
+
+    /// Drops every Whisper take, and the vocabulary words dictation brought in that have no takes
+    /// left. Words the user added by hand stay, even before they have takes.
+    func withoutWhisperTakes() -> Dataset {
+        let whisperWords = Set(templates.filter(\.isFromWhisper).map(\.label))
+        let kept = templates.filter { !$0.isFromWhisper }
+        let used = Set(kept.map(\.label))
+        let words = vocabulary.filter { word in
+            !whisperWords.contains(word) || used.contains(word) || Dataset.starter.vocabulary.contains(word)
+        }
+        return Dataset(vocabulary: words, templates: kept)
+    }
 }
 
 /// Persists the training set as JSON in Application Support.

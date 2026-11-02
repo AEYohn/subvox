@@ -128,6 +128,35 @@ final class DictationTests: XCTestCase {
         XCTAssertEqual(result.accuracy, 1, accuracy: 1e-9)
     }
 
+    func testChanceIsTheSameMajorityBaselineInEveryComparisonRow() throws {
+        // Unbalanced on purpose: 4 "yes" vs 2 "no", so majority (4/6) differs from 1/words (1/2).
+        let manual = (0..<4).map { _ in take("yes", axis: 0) } + (0..<2).map { _ in take("no", axis: 1) }
+        let whisper = (0..<3).map { _ in take("yes", axis: 0, source: "whisper") }
+            + (0..<3).map { _ in take("no", axis: 1, source: "whisper") }
+        let alone = try XCTUnwrap(Evaluation.run(templates: manual, featureSet: .all, permutations: 10))
+        let augmented = try XCTUnwrap(Evaluation.augmented(manual: manual, extra: whisper, featureSet: .all))
+        let transfer = try XCTUnwrap(Evaluation.transfer(train: whisper, test: manual, featureSet: .all))
+        XCTAssertEqual(alone.chance, 4.0 / 6, accuracy: 1e-9)
+        XCTAssertEqual(augmented.chance, alone.chance, accuracy: 1e-9)
+        XCTAssertEqual(transfer.chance, alone.chance, accuracy: 1e-9)
+        XCTAssertEqual(Evaluation.majorityShare([]), 0)
+    }
+
+    func testDeletingWhisperTakesKeepsHandAddedWords() {
+        let dataset = Dataset(vocabulary: ["yes", "climb", "the", "rope"], templates: [
+            take("yes", axis: 0),
+            take("yes", axis: 0, source: "whisper"),
+            take("the", axis: 1, source: "whisper"),     // brought in by dictation, no other takes
+            take("rope", axis: 2, source: "whisper"),
+            take("rope", axis: 2),                       // also hand-labelled
+        ])
+        let cleaned = dataset.withoutWhisperTakes()
+        XCTAssertFalse(cleaned.templates.contains(where: \.isFromWhisper))
+        XCTAssertEqual(cleaned.templates.count, 2)
+        // "climb" was added by hand and has no takes yet: it must survive.
+        XCTAssertEqual(cleaned.vocabulary, ["yes", "climb", "rope"])
+    }
+
     func testOldDatasetsWithoutSourceStillDecode() throws {
         let json = #"{"vocabulary":["yes"],"templates":[{"id":"7C1D3A2E-0000-4000-8000-000000000001","label":"yes","samples":[],"createdAt":0}]}"#
         let dataset = try JSONDecoder().decode(Dataset.self, from: Data(json.utf8))

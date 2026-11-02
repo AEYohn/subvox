@@ -34,7 +34,8 @@ enum DatasetSubset {
 /// Accuracy of nearest-neighbour DTW on one set of test takes, with references from elsewhere.
 struct SourceScore: Sendable, Hashable {
     var accuracy: Double
-    /// 1 / number of words: what guessing would get with balanced words.
+    /// Accuracy of always guessing the test set's most common word, as `Evaluation.chance`,
+    /// so every row of a comparison has the same baseline for the same test takes.
     var chance: Double
     var tested: Int
     var references: Int
@@ -52,7 +53,7 @@ extension Evaluation {
               let classifier = TemplateClassifier(templates: trainSet, featureSet: featureSet) else { return nil }
         let correct = testSet.filter { classifier.rank($0.samples).first?.label == $0.label }.count
         return SourceScore(accuracy: Double(correct) / Double(testSet.count),
-                           chance: 1 / Double(shared.count),
+                           chance: majorityShare(testSet),
                            tested: testSet.count,
                            references: trainSet.count,
                            labels: shared.sorted())
@@ -85,10 +86,17 @@ extension Evaluation {
         }
         guard tested > 0 else { return nil }
         return SourceScore(accuracy: Double(correct) / Double(tested),
-                           chance: 1 / Double(words.count),
+                           chance: majorityShare(manual),
                            tested: tested,
                            references: all.count - 1,
                            labels: words.sorted())
+    }
+
+    /// Share of the most common label: the accuracy of always guessing it.
+    static func majorityShare(_ takes: [Template]) -> Double {
+        let counts = Dictionary(grouping: takes, by: \.label).mapValues(\.count)
+        guard let most = counts.values.max(), !takes.isEmpty else { return 0 }
+        return Double(most) / Double(takes.count)
     }
 }
 
