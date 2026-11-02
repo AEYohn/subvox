@@ -6,6 +6,9 @@ import AVFoundation
 final class AudioClipRecorder: @unchecked Sendable {
     static let sampleRate: Double = 16_000
     static let prerollSeconds: Double = 0.3
+    /// A buffer that starts further than this from where the audio so far ends is a break in
+    /// the stream (engine stopped and restarted, device switched, buffers dropped).
+    static let maxGapSeconds: Double = 0.1
 
     private let lock = NSLock()
     private let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
@@ -43,10 +46,17 @@ final class AudioClipRecorder: @unchecked Sendable {
             guard let converted = convert(buffer) else { return }
             let bufferStart = time.isHostTimeValid ? AVAudioTime.seconds(forHostTime: time.hostTime) : nil
             if isActive {
+                // Audio from before a break (e.g. a stale pre-roll from before the engine was
+                // restarted) would shift every word time; keep only what follows the break.
+                if Self.isBreak(start: startSeconds, count: samples.count, next: bufferStart) {
+                    samples.removeAll()
+                    startSeconds = nil
+                }
                 if startSeconds == nil { startSeconds = bufferStart }
                 samples.append(contentsOf: converted)
             }
             // Pre-roll always runs, so the next clip can start a little before the key press.
+            if Self.isBreak(start: prerollStart, count: preroll.count, next: bufferStart) { preroll.removeAll() }
             if preroll.isEmpty { prerollStart = bufferStart }
             preroll.append(contentsOf: converted)
             let limit = Int(Self.prerollSeconds * Self.sampleRate)
@@ -55,7 +65,18 @@ final class AudioClipRecorder: @unchecked Sendable {
                 preroll.removeFirst(drop)
                 prerollStart = prerollStart.map { $0 + Double(drop) / Self.sampleRate }
             }
+            // Re-anchor on this buffer's host time, so the device clock's drift against the host
+            // clock doesn't build up over a long session.
+            if let bufferStart {
+                prerollStart = bufferStart + Double(converted.count - preroll.count) / Self.sampleRate
+            }
         }
+    }
+
+    /// True when a buffer starting at `next` doesn't continue `count` samples that began at `start`.
+    static func isBreak(start: TimeInterval?, count: Int, next: TimeInterval?) -> Bool {
+        guard let start, let next, count > 0 else { return false }
+        return abs(start + Double(count) / sampleRate - next) > maxGapSeconds
     }
 
     private func convert(_ buffer: AVAudioPCMBuffer) -> [Float]? {
